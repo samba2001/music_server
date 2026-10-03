@@ -1,88 +1,79 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.openapi.utils import get_openapi
 
-from app.config import ALLOWED_ORIGINS
-from app.database import init_db
-from app.routers.auth_router import router as auth_router
-from app.routers.download_router import router as download_router
-from app.routers.playlist_router import router as playlist_router
-from app.routers.song_router import router as song_router
+from app.api.v1 import auth, history, playlists, songs, users
+from app.core.config import settings
+from app.core.database import init_db
 
-from app.database import AsyncSessionLocal
-from app.managers.auth_manager import AuthManager
-from app.managers.download_manager import DownloadManager
-from app.managers.playlist_manager import PlaylistManager
-from app.managers.song_manager import SongManager
-from app.models import DownloadRequest, Playlist, Song, User
-from app.schemas import DownloadRequestCreate, PlaylistCreate, PlaylistTrackReorderRequest
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger("music_server")
 
-
-async def run_download_background(request_id: int) -> None:
-    return None
-
-logger = logging.getLogger(__name__)
-SEEN_DOWNLOADS: set[str] = set()
-
-
-async def initialize_database() -> None:
-    await init_db()
-
-
+# Explicit origins are required when allow_credentials=True
+origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "https://music.kuluru.in",
+    "https://my-music-app-ui.reddy200101.workers.dev",
+]
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_: FastAPI):
+    logger.info("Starting application startup")
     await init_db()
-    logger.info("Database initialized")
+    logger.info("Database initialization complete")
     yield
+    logger.info("Application shutdown complete")
 
 
-app = FastAPI(title="Music Server", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
+
+# Pass the explicit origins list instead of ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.include_router(auth_router)
-app.include_router(song_router)
-app.include_router(playlist_router)
-app.include_router(download_router)
+
+app.include_router(auth.router, prefix="/api/v1")
+app.include_router(playlists.router, prefix="/api/v1")
+app.include_router(songs.router, prefix="/api/v1")
+app.include_router(history.router, prefix="/api/v1")
+app.include_router(users.router, prefix="/api/v1")
 
 
-@app.post("/api/requests/download")
-async def legacy_create_download_request(payload: dict[str, str], background_tasks: BackgroundTasks) -> dict[str, object]:
-    youtube_url = payload.get("youtube_url", "")
-    youtube_id = youtube_url.split("v=")[-1].split("&")[0] if "youtube.com/watch" in youtube_url else youtube_url.split("/")[-1]
-    if youtube_id not in SEEN_DOWNLOADS:
-        SEEN_DOWNLOADS.add(youtube_id)
-        background_tasks.add_task(run_download_background, youtube_id)
-    return {"status": "queued", "youtube_id": youtube_id}
-
-
-@app.get("/api/playlists")
-async def legacy_list_playlists() -> list[dict[str, object]]:
-    return []
-
-
-@app.post("/api/playlists")
-async def legacy_create_playlist(payload: dict[str, str]) -> dict[str, object]:
-    return {"id": 1, "name": payload.get("name", ""), "user_id": 1}
-
-
-@app.post("/api/playlists/{playlist_id}/clone")
-async def legacy_clone_playlist(playlist_id: int) -> dict[str, object]:
-    return {"id": playlist_id + 1, "name": "Favorites", "cloned_from_id": playlist_id}
-
-
-@app.get("/health")
+@app.get("/health", tags=["health"])
 async def health() -> dict[str, str]:
+    logger.info("Health check requested")
     return {"status": "ok"}
 
 
-@app.get("/")
-async def root() -> dict[str, str]:
-    return {"message": "Music Server API"}
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    
+    openapi_schema.setdefault("components", {}).setdefault("securitySchemes", {})["bearerAuth"] = {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+    }
+    
+    for path, path_obj in openapi_schema.get("paths", {}).items():
+        for operation in path_obj.values():
+            if path == "/api/v1/auth/google":
+                continue
+            operation.setdefault("security", []).append({"bearerAuth": []})
+            
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi

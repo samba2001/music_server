@@ -1,105 +1,82 @@
-# music_server
+# Music Server API
 
-A production-style FastAPI backend for a self-hosted music server built with Python 3.11+, SQLite, SQLAlchemy 2.0, and async support via aiosqlite.
+Async FastAPI backend for local music streaming, YouTube audio ingestion, playlists, and playback history.
 
-## Features
-
-- FastAPI application with CORS support for local frontend development
-- Async SQLite database with SQLAlchemy 2.0 models
-- Manager / repository / router architecture for clean separation of concerns
-- Authentication bypass layer for local/dev use via BYPASS_AUTH
-- Download request handling and playlist/song endpoints
-- Media storage under storage/media
-
-## Project structure
-
-- app/main.py - FastAPI app entrypoint and compatibility routes
-- app/config.py - configuration and logging
-- app/database.py - async database session setup
-- app/models.py - SQLAlchemy ORM models
-- app/schemas.py - Pydantic request/response schemas
-- app/managers/ - business logic managers
-- app/repositories/ - database access layer
-- app/routers/ - API route handlers
-
-## Requirements
-
-- Python 3.11+
-- SQLite
-- FastAPI
-- SQLAlchemy 2.0
-- aiosqlite
-- google-auth
-- yt-dlp
-- httpx
-
-## Setup
-
-1. Create and activate a virtual environment:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Run the development server:
-   ```bash
-   uvicorn app.main:app --reload
-   ```
-
-4. Health check:
-   ```bash
-   curl http://127.0.0.1:8000/health
-   ```
-
-## Configuration
-
-Environment variables:
-
-- DATABASE_URL - SQLite connection string (defaults to sqlite+aiosqlite:///./music_server.db)
-- BYPASS_AUTH - Set to True for local/dev auth bypass (default: True)
-- GOOGLE_CLIENT_ID - Google OAuth client ID when BYPASS_AUTH is False
-
-## API overview
-
-### Auth
-- POST /api/v1/auth/google
-- GET /api/v1/users/me
-
-### Downloads
-- POST /api/v1/requests/download
-- GET /api/v1/requests
-- GET /api/v1/requests/{id}
-
-### Songs
-- GET /api/v1/songs
-- GET /api/v1/songs/{id}
-- GET /api/v1/songs/{id}/stream
-- GET /api/v1/songs/{id}/lyrics
-- DELETE /api/v1/songs/{id}
-
-### Playlists
-- GET /api/v1/playlists
-- POST /api/v1/playlists
-- POST /api/v1/playlists/{id}/clone
-- PUT /api/v1/playlists/{id}/tracks
-- DELETE /api/v1/playlists/{id}
-
-### Compatibility routes
-- GET /health
-- POST /api/requests/download
-- GET /api/playlists
-- POST /api/playlists
-- POST /api/playlists/{id}/clone
-
-## Testing
-
-Run the regression tests:
+## Run locally
 
 ```bash
-pytest -q
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+cp .env.example .env
+uv run music-server
 ```
+
+The default database is SQLite. Set `DATABASE_URL` to an async PostgreSQL URL such as `postgresql+asyncpg://user:password@host/database` for PostgreSQL.
+
+Audio is stored in `media/songs/`. YouTube downloads require `ffmpeg` on the system PATH.
+
+Make a user admin:
+
+1. Edit `scripts/make_user_admin.py` and set `DEFAULT_EMAIL` to the email you want to promote.
+2. Run the script (no flags required):
+
+```bash
+source .venv/bin/activate
+python -m scripts.make_user_admin
+```
+
+## Playlist creation and song management API
+
+Authenticated users, including admins, can create and edit their own user playlists.
+Only admins can create or modify default playlists. A playlist song can be added using
+either an existing `song_id` or a YouTube URL; when given a URL, the server downloads
+the audio, creates the library song if needed, and maps it to the playlist.
+
+Create a user playlist:
+
+```bash
+curl --request POST 'http://127.0.0.1:8000/api/v1/playlists/' \
+  --header 'Authorization: Bearer YOUR_ACCESS_TOKEN' \
+  --header 'Content-Type: application/json' \
+  --data '{"name":"My playlist"}'
+```
+
+Add an existing song by ID:
+
+```bash
+curl --request POST 'http://127.0.0.1:8000/api/v1/playlists/PLAYLIST_ID/songs' \
+  --header 'Authorization: Bearer YOUR_ACCESS_TOKEN' \
+  --header 'Content-Type: application/json' \
+  --data '{"song_id":42}'
+```
+
+Or import a YouTube song and add it in the same request:
+
+```bash
+curl --request POST 'http://127.0.0.1:8000/api/v1/playlists/PLAYLIST_ID/songs' \
+  --header 'Authorization: Bearer YOUR_ACCESS_TOKEN' \
+  --header 'Content-Type: application/json' \
+  --data '{"youtube_url":"https://www.youtube.com/watch?v=VIDEO_ID"}'
+```
+
+Use `GET /api/v1/playlists/` to list the authenticated user's playlists,
+`GET /api/v1/playlists/default` to list default playlists, and
+`GET /api/v1/songs/search?q=QUERY` to find existing songs. Provide exactly one of
+`song_id` or `youtube_url`. An already-mapped song returns `409 Conflict`; missing
+songs return `404`; non-admin attempts to modify default playlists return `403`.
+
+Alembic migrations
+------------------
+
+This project includes a minimal Alembic scaffold in `alembic/`. To apply the `is_admin` migration (adds the `is_admin` column to `users`):
+
+1. Install Alembic: `pip install alembic`
+2. Initialize (not needed here — scaffold already present) then run:
+
+```bash
+alembic upgrade head
+```
+
+Notes:
+- The `alembic/env.py` reads the database URL from `app.core.config.settings.database_url`.
+- For production workflow, prefer creating and tracking migrations with `alembic revision --autogenerate -m "msg"` rather than editing files by hand.
